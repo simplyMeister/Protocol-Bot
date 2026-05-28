@@ -1,0 +1,71 @@
+{
+    "generated_date": "2026-05-28 13:10",
+    "service_dates": {
+        "Thursday Chapel": "2026-05-28",
+        "Sunday Omega": "2026-05-31",
+        "Sunday Alpha": "2026-05-31",
+        "Tuesday Chapel": "2026-06-02"
+    },
+    "roster": {
+        "Thursday Chapel": {
+            "Entrance Allocation": [
+                "AGBABIAKA MOJOYINOLUWA FAITH"
+            ],
+            "Tag Allocation": [
+                "AKINSANYA IFEOLUWA"
+            ],
+            "Counting": [
+                "DADA-RICHARD'S OYINKANSOLA"
+            ],
+            "Tag Collection": [
+                "GEORGE MATTHEW DEINMA",
+                "LAURETTA"
+            ]
+        },
+        "Sunday Omega": {
+            "Entrance Allocation": [
+                "IFEANYICHUKWU EBERECHUKWU"
+            ],
+            "Tag Allocation": [
+                "LOVE MUSA"
+            ],
+            "Counting": [
+                "OKECHUKWU GRACE CHINENYE"
+            ],
+            "Tag Collection": [
+                "EMMANUELLA SOLANKE",
+                "TIOLUWANIMI TURNER"
+            ]
+        },
+        "Sunday Alpha": {
+            "Entrance Allocation": [
+                "ADESEGUN ISEOLUWA GRACE"
+            ],
+            "Tag Allocation": [
+                "EGEDEGBE ELAINE"
+            ],
+            "Counting": [
+                "ENEBE GOODNEWS"
+            ],
+            "Tag Collection": [
+                "TIFFANY IHEAKANWA",
+                "ODUNAYO EKUNJESU"
+            ]
+        },
+        "Tuesday Chapel": {
+            "Entrance Allocation": [
+                "OLASUPO JUDAH SAMUEL"
+            ],
+            "Tag Allocation": [
+                "TOLUWANI BODE - OLAJIDE"
+            ],
+            "Counting": [
+                "AYANFE OLUSINA DAVID"
+            ],
+            "Tag Collection": [
+                "OKENIYI EXCELLENCE",
+                "NAKPODIA OGHENERUKEVWE"
+            ]
+        }
+    }
+}
