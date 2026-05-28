@@ -1,7 +1,16 @@
 import logging
+import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-from config import TOKEN, is_admin, admin_only
+from config import (
+    TOKEN,
+    PORT,
+    WEBHOOK_URL,
+    WEBHOOK_SECRET,
+    RENDER_EXTERNAL_URL,
+    is_admin,
+    admin_only,
+)
 from modules.attendance import meeting_handler
 from modules.daily_report import count_handler
 from modules.qa import answer_question, ai_status
@@ -36,15 +45,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-if __name__ == '__main__':
-    import asyncio
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-
+def build_application():
     application = ApplicationBuilder().token(TOKEN).build()
-    
+
     # Handlers
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('ai_status', ai_status))
@@ -53,9 +56,37 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('add', admin_only(add_member)))
     application.add_handler(CommandHandler('remove', admin_only(remove_member)))
     application.add_handler(CommandHandler('list', admin_only(list_members)))
-    
+
     # Q&A Handler (Text messages that aren't commands) - Allow EVERYONE
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), answer_question))
-    
-    print("Bot is running...")
-    application.run_polling()
+    return application
+
+if __name__ == '__main__':
+    import asyncio
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+    application = build_application()
+
+    resolved_webhook_url = WEBHOOK_URL or RENDER_EXTERNAL_URL
+    if resolved_webhook_url:
+        base = resolved_webhook_url.rstrip("/")
+        webhook_path = f"/webhook/{WEBHOOK_SECRET}"
+        full_webhook_url = f"{base}{webhook_path}"
+        listen_port = int(os.getenv("PORT", str(PORT)))
+
+        print(f"Bot is running in WEBHOOK mode on port {listen_port}...")
+        print(f"Webhook endpoint path: {webhook_path}")
+
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=listen_port,
+            url_path=webhook_path.lstrip("/"),
+            webhook_url=full_webhook_url,
+            drop_pending_updates=True
+        )
+    else:
+        print("Bot is running in POLLING mode...")
+        application.run_polling()
