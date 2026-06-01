@@ -1,4 +1,5 @@
 python-telegram-bot[webhooks]
+aiohttp
 python-docx
 python-dotenv
 google-generativeai
