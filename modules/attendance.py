@@ -1,5 +1,12 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, CallbackQueryHandler
+from telegram.ext import (
+    ContextTypes,
+    ConversationHandler,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+)
 from modules.utils import load_members_from_excel, save_weekly_roster, load_roster_history, save_roster_history
 from config import admin_only
 import datetime
@@ -62,40 +69,111 @@ async def start_meeting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_attendance_keyboard(update.message, context)
     return ATTENDANCE
 
-async def show_attendance_keyboard(message, context):
-    """Display attendance selection keyboard"""
-    members = context.user_data['all_members']
-    present = context.user_data['attendance']
-    
-    # Get current date and time
+def _member_matches_query(name: str, query: str) -> bool:
+    return query in name.lower()
+
+
+async def show_attendance_keyboard(message, context, subtitle=None):
+    """Display attendance selection keyboard (full list or search results)."""
+    members = context.user_data["all_members"]
+    present = context.user_data["attendance"]
+    search_query = context.user_data.get("attendance_search_query")
+
     now = datetime.datetime.now()
     date_str = now.strftime("%A, %d/%m/%Y at %H:%M")
-    
+
+    sorted_members = sorted(members, key=lambda x: x["name"])
+    if search_query:
+        sorted_members = [
+            m for m in sorted_members
+            if _member_matches_query(m["name"], search_query)
+        ]
+
     keyboard = []
-    # Sort members by name for easier finding
-    sorted_members = sorted(members, key=lambda x: x['name'])
-    
-    for member in sorted_members:
-        name = member['name']
+    for member in sorted_members[:20]:
+        name = member["name"]
         status = "✅" if name in present else "❌"
         keyboard.append([InlineKeyboardButton(f"{status} {name}", callback_data=f"toggle_{name}")])
-    
+
+    if search_query and len(sorted_members) > 20:
+        keyboard.append([
+            InlineKeyboardButton(f"… and {len(sorted_members) - 20} more — refine search", callback_data="attendance_search")
+        ])
+
+    keyboard.append([InlineKeyboardButton("🔍 Search by name", callback_data="attendance_search")])
+    if search_query:
+        keyboard.append([InlineKeyboardButton("◀ Show all members", callback_data="attendance_show_all")])
     keyboard.append([InlineKeyboardButton("✓ Done", callback_data="done_attendance")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    text = f"📋 **Click attendance for today's meeting**\n{date_str}"
-    
+
+    present_count = len(present)
+    text = f"📋 **Attendance for today's meeting**\n{date_str}\n\nPresent: **{present_count}**"
+    if subtitle:
+        text += f"\n{subtitle}"
+    if search_query:
+        text += f"\n\nShowing matches for: `{search_query}` ({len(sorted_members)} found)"
+    if not sorted_members:
+        text += "\n\n_No members matched. Tap Search again or Show all._"
+
     try:
         await message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-    except:
+    except Exception:
         await message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def handle_attendance_search_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin typed a name to search during attendance."""
+    if not context.user_data.get("awaiting_attendance_search"):
+        return ATTENDANCE
+
+    query_text = update.message.text.strip()
+    if not query_text:
+        await update.message.reply_text("Please type at least one letter of the member's name.")
+        return ATTENDANCE
+
+    context.user_data["awaiting_attendance_search"] = False
+    context.user_data["attendance_search_query"] = query_text.lower()
+
+    matches = [
+        m for m in context.user_data["all_members"]
+        if _member_matches_query(m["name"], query_text.lower())
+    ]
+
+    if not matches:
+        context.user_data["awaiting_attendance_search"] = True
+        await update.message.reply_text(
+            f"No member found matching **{query_text}**.\nType another name to search.",
+            parse_mode="Markdown",
+        )
+        return ATTENDANCE
+
+    await show_attendance_keyboard(
+        update.message,
+        context,
+        subtitle=f"Found **{len(matches)}** match(es). Tap to mark present/absent.",
+    )
+    return ATTENDANCE
+
 
 async def handle_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle attendance toggle and completion"""
     query = update.callback_query
     await query.answer()
     data = query.data
-    
+
+    if data == "attendance_search":
+        context.user_data["awaiting_attendance_search"] = True
+        await query.edit_message_text(
+            "🔍 **Search by name**\n\nType part of the member's name below (e.g. `Buchi`).",
+            parse_mode="Markdown",
+        )
+        return ATTENDANCE
+
+    if data == "attendance_show_all":
+        context.user_data["awaiting_attendance_search"] = False
+        context.user_data.pop("attendance_search_query", None)
+        await show_attendance_keyboard(query.message, context)
+        return ATTENDANCE
+
     if data == "done_attendance":
         if not context.user_data['attendance']:
             await query.edit_message_text("❌ No members marked present. Meeting cancelled.")
@@ -629,7 +707,10 @@ async def handle_swap(update: Update, context: ContextTypes.DEFAULT_TYPE):
 meeting_handler = ConversationHandler(
     entry_points=[CommandHandler('meeting', start_meeting)],
     states={
-        ATTENDANCE: [CallbackQueryHandler(handle_attendance)],
+        ATTENDANCE: [
+            CallbackQueryHandler(handle_attendance),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_attendance_search_input),
+        ],
         CONFIRM_ROSTER: [CallbackQueryHandler(handle_roster_confirmation)],
         CONFIRM_NOTIFICATIONS: [
             CallbackQueryHandler(handle_notification_confirmation, pattern="^notif_.*"),

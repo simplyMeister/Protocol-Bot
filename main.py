@@ -73,8 +73,12 @@ def build_application():
     application.add_handler(CommandHandler("add", admin_only(add_member)))
     application.add_handler(CommandHandler("remove", admin_only(remove_member)))
     application.add_handler(CommandHandler("list", admin_only(list_members)))
+    # Q&A only in private chats — stay silent in groups unless /commands are used.
     application.add_handler(
-        MessageHandler(filters.TEXT & (~filters.COMMAND), answer_question)
+        MessageHandler(
+            filters.TEXT & (~filters.COMMAND) & filters.ChatType.PRIVATE,
+            answer_question,
+        )
     )
     return application
 

@@ -3,6 +3,7 @@ from telegram.ext import ContextTypes
 
 import google.generativeai as genai
 from config import GEMINI_API_KEY
+from modules.protocol_kb import search_protocol_document
 import logging
 import re
 import time
@@ -288,33 +289,41 @@ def _build_contextual_kb_answer(question: str, last_topic: str = None):
     return "I can't provide an answer to that question, please ask me protocol related questions.", None
 
 async def answer_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only answer free-text questions in private chats (groups: commands only).
+    if update.effective_chat and update.effective_chat.type != "private":
+        return
+
     text = update.message.text
-    
-    # Try AI first if available
-    chat_history = context.user_data.get('ai_chat_history', [])
+
+    # 1) Protocol sub-unit document (highest priority)
+    doc_answer = search_protocol_document(text)
+    if doc_answer:
+        await update.message.reply_text(doc_answer)
+        return
+
+    # 2) Built-in protocol keyword knowledge
+    last_topic = context.user_data.get("last_topic")
+    kb_answer, matched_key = _build_contextual_kb_answer(text, last_topic)
+    if matched_key:
+        context.user_data["last_topic"] = matched_key
+    if kb_answer and not kb_answer.startswith("I can't provide an answer"):
+        await update.message.reply_text(kb_answer, parse_mode="Markdown")
+        return
+
+    # 3) AI (only if document + built-in KB did not answer)
+    chat_history = context.user_data.get("ai_chat_history", [])
     ai_response = await get_ai_response(text, chat_history)
-    
     if ai_response:
-        # Update history
         chat_history.append({"role": "user", "parts": [text]})
         chat_history.append({"role": "model", "parts": [ai_response]})
-        # Keep history short
-        context.user_data['ai_chat_history'] = chat_history[-10:]
-        # Avoid Markdown parse failures from model-generated symbols/underscores.
+        context.user_data["ai_chat_history"] = chat_history[-10:]
         await update.message.reply_text(ai_response)
         return
 
-    # If AI key exists but response failed, provide explicit signal and still answer.
     if GEMINI_API_KEY:
-        logger.error("AI response unavailable despite configured GEMINI_API_KEY; using KB fallback.")
+        logger.error("AI unavailable; using final KB fallback.")
 
-    # Fallback to contextual knowledge-base answer (always substantive)
-    last_topic = context.user_data.get('last_topic')
-    response, matched_key = _build_contextual_kb_answer(text, last_topic)
-    if matched_key:
-        context.user_data['last_topic'] = matched_key
-
-    await update.message.reply_text(response, parse_mode="Markdown")
+    await update.message.reply_text(kb_answer, parse_mode="Markdown")
 
 async def ai_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show current AI availability and cooldown state."""
