@@ -89,6 +89,26 @@ def _resolve_public_url():
     return ""
 
 
+async def _register_telegram_webhook(application, full_webhook_url: str):
+    """Register webhook with Telegram and verify it was accepted."""
+    logger.info("Registering Telegram webhook: %s", full_webhook_url)
+    await application.bot.set_webhook(
+        url=full_webhook_url,
+        secret_token=WEBHOOK_SECRET,
+        drop_pending_updates=True,
+    )
+    info = await application.bot.get_webhook_info()
+    if not info.url:
+        raise RuntimeError(
+            f"Telegram rejected webhook registration. "
+            f"last_error={info.last_error_message!r}"
+        )
+    logger.info("Webhook active: %s (pending=%s)", info.url, info.pending_update_count)
+    if info.last_error_message:
+        logger.warning("Webhook warning from Telegram: %s", info.last_error_message)
+    return info
+
+
 async def _handle_root(_request):
     return web.Response(
         text="Protocol Bot is online.\nUse Telegram to interact with this bot.",
@@ -97,23 +117,41 @@ async def _handle_root(_request):
 
 
 async def _handle_healthz(request):
-    application = request.app.get("ptb_app")
-    payload = {"status": "ok", "service": "protocol-bot"}
-    if application:
-        try:
-            info = await application.bot.get_webhook_info()
+    application = request.app["ptb_app"]
+    expected = request.app["expected_webhook_url"]
+    payload = {
+        "status": "ok",
+        "service": "protocol-bot",
+        "expected_webhook_url": expected,
+    }
+
+    try:
+        info = await application.bot.get_webhook_info()
+        payload["webhook_url"] = info.url or ""
+        payload["pending_updates"] = info.pending_update_count
+        payload["last_error"] = info.last_error_message or None
+
+        # Auto-repair if webhook is missing or wrong (e.g. after bad deploy)
+        if info.url != expected:
+            logger.warning(
+                "Webhook mismatch (have=%r expected=%r). Re-registering...",
+                info.url,
+                expected,
+            )
+            info = await _register_telegram_webhook(application, expected)
             payload["webhook_url"] = info.url
-            payload["pending_updates"] = info.pending_update_count
-            payload["last_error"] = info.last_error_message or None
-        except Exception as exc:
-            payload["webhook_check_error"] = str(exc)
+            payload["repaired"] = True
+    except Exception as exc:
+        logger.exception("healthz webhook check failed")
+        payload["status"] = "degraded"
+        payload["error"] = str(exc)
+
     return web.json_response(payload)
 
 
 async def _handle_telegram_webhook(request):
     application = request.app["ptb_app"]
 
-    # Validate Telegram secret header when secret_token is configured
     expected_secret = request.app.get("webhook_secret")
     if expected_secret:
         received = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
@@ -131,8 +169,7 @@ async def _handle_telegram_webhook(request):
     if not update:
         return web.Response(status=200, text="ok")
 
-    update_type = "message" if update.message else update.callback_query and "callback" or "other"
-    logger.info("Incoming update id=%s type=%s", update.update_id, update_type)
+    logger.info("Incoming update id=%s", update.update_id)
 
     try:
         await application.process_update(update)
@@ -143,29 +180,8 @@ async def _handle_telegram_webhook(request):
     return web.Response(status=200, text="ok")
 
 
-async def _on_startup(app):
-    application = app["ptb_app"]
-    await application.initialize()
-    await application.start()
-
-    base_url = app["public_url"]
-    webhook_path = app["webhook_path"]
-    full_webhook_url = f"{base_url}{webhook_path}"
-
-    await application.bot.set_webhook(
-        url=full_webhook_url,
-        secret_token=WEBHOOK_SECRET,
-        drop_pending_updates=True,
-    )
-    info = await application.bot.get_webhook_info()
-    logger.info("Telegram webhook registered: %s", info.url)
-    if info.last_error_message:
-        logger.warning("Webhook last error: %s", info.last_error_message)
-
-
 async def _on_shutdown(app):
     application = app["ptb_app"]
-    # Do NOT delete webhook on shutdown — Render restarts would break the bot.
     await application.stop()
     await application.shutdown()
     logger.info("Bot shutdown complete")
@@ -175,25 +191,27 @@ async def run_webhook_server():
     base_url = _resolve_public_url()
     if not base_url:
         raise RuntimeError(
-            "Set WEBHOOK_URL=https://your-app.onrender.com on Render "
-            "(or rely on RENDER_EXTERNAL_URL / RENDER_EXTERNAL_HOSTNAME)."
+            "Set WEBHOOK_URL=https://protocol-bot-1.onrender.com on Render."
         )
 
     webhook_path = f"/webhook/{WEBHOOK_SECRET}"
+    full_webhook_url = f"{base_url}{webhook_path}"
     listen_port = int(os.getenv("PORT", str(PORT)))
 
     application = build_application()
+    await application.initialize()
+    await application.start()
+
     app = web.Application()
     app["ptb_app"] = application
     app["public_url"] = base_url
     app["webhook_path"] = webhook_path
     app["webhook_secret"] = WEBHOOK_SECRET
+    app["expected_webhook_url"] = full_webhook_url
 
     app.router.add_get("/", _handle_root)
     app.router.add_get("/healthz", _handle_healthz)
     app.router.add_post(webhook_path, _handle_telegram_webhook)
-
-    app.on_startup.append(_on_startup)
     app.on_shutdown.append(_on_shutdown)
 
     runner = web.AppRunner(app)
@@ -202,9 +220,9 @@ async def run_webhook_server():
     await site.start()
 
     logger.info("HTTP server listening on 0.0.0.0:%s", listen_port)
-    logger.info("Root: %s/", base_url)
-    logger.info("Health: %s/healthz", base_url)
-    logger.info("Webhook: %s%s", base_url, webhook_path)
+
+    # Register webhook AFTER HTTP server is up (critical for Render)
+    await _register_telegram_webhook(application, full_webhook_url)
 
     stop_event = asyncio.Event()
 
@@ -224,7 +242,7 @@ async def run_webhook_server():
 
 def run_polling():
     application = build_application()
-    logger.info("Bot is running in POLLING mode...")
+    logger.info("Bot is running in POLLING mode (local dev)...")
     application.run_polling(drop_pending_updates=True)
 
 
