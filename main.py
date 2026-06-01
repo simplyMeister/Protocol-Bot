@@ -13,6 +13,7 @@ from config import (
     WEBHOOK_URL,
     WEBHOOK_SECRET,
     RENDER_EXTERNAL_URL,
+    RENDER_EXTERNAL_HOSTNAME,
     is_admin,
     admin_only,
 )
@@ -31,29 +32,40 @@ logger = logging.getLogger(__name__)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_admin(user_id):
-        await update.message.reply_text(
-            "Welcome to the **Protocol Bot** (Admin Mode)!\n\n"
-            "**Admin Commands:**\n"
+        text = (
+            "Welcome to the Protocol Bot (Admin Mode)!\n\n"
+            "Admin Commands:\n"
             "/meeting - Start meeting attendance & generate weekly roster\n"
             "/count - Record daily service counts and generate report\n"
             "/ai_status - Check AI availability and cooldown\n"
             "/add <name> - Add a member\n"
             "/remove <name> - Remove a member\n"
             "/list - List all members\n\n"
-            "You can also ask general questions.",
-            parse_mode="Markdown",
+            "You can also ask general questions."
         )
     else:
-        await update.message.reply_text(
-            "Welcome to the **Protocol Bot**!\n\n"
+        text = (
+            "Welcome to the Protocol Bot!\n\n"
             "I'm here to answer your questions about Protocol roles, duties, and general inquiries.\n"
-            "Just type your question below! 👇",
-            parse_mode="Markdown",
+            "Just type your question below!"
         )
+    await update.message.reply_text(text)
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.exception("Handler error while processing update", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "Sorry, something went wrong while handling your message. Please try again."
+            )
+        except Exception:
+            pass
 
 
 def build_application():
     application = ApplicationBuilder().token(TOKEN).build()
+    application.add_error_handler(on_error)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ai_status", ai_status))
     application.add_handler(meeting_handler)
@@ -68,7 +80,13 @@ def build_application():
 
 
 def _resolve_public_url():
-    return (WEBHOOK_URL or RENDER_EXTERNAL_URL or "").rstrip("/")
+    if WEBHOOK_URL:
+        return WEBHOOK_URL.rstrip("/")
+    if RENDER_EXTERNAL_URL:
+        return RENDER_EXTERNAL_URL.rstrip("/")
+    if RENDER_EXTERNAL_HOSTNAME:
+        return f"https://{RENDER_EXTERNAL_HOSTNAME}".rstrip("/")
+    return ""
 
 
 async def _handle_root(_request):
@@ -78,20 +96,50 @@ async def _handle_root(_request):
     )
 
 
-async def _handle_healthz(_request):
-    return web.json_response({"status": "ok", "service": "protocol-bot"})
+async def _handle_healthz(request):
+    application = request.app.get("ptb_app")
+    payload = {"status": "ok", "service": "protocol-bot"}
+    if application:
+        try:
+            info = await application.bot.get_webhook_info()
+            payload["webhook_url"] = info.url
+            payload["pending_updates"] = info.pending_update_count
+            payload["last_error"] = info.last_error_message or None
+        except Exception as exc:
+            payload["webhook_check_error"] = str(exc)
+    return web.json_response(payload)
 
 
 async def _handle_telegram_webhook(request):
     application = request.app["ptb_app"]
+
+    # Validate Telegram secret header when secret_token is configured
+    expected_secret = request.app.get("webhook_secret")
+    if expected_secret:
+        received = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if received != expected_secret:
+            logger.warning("Webhook rejected: invalid secret token header")
+            return web.Response(status=403, text="Forbidden")
+
     try:
         data = await request.json()
     except Exception:
+        logger.exception("Invalid webhook JSON")
         return web.Response(status=400, text="Invalid JSON")
 
     update = Update.de_json(data, application.bot)
-    if update:
+    if not update:
+        return web.Response(status=200, text="ok")
+
+    update_type = "message" if update.message else update.callback_query and "callback" or "other"
+    logger.info("Incoming update id=%s type=%s", update.update_id, update_type)
+
+    try:
         await application.process_update(update)
+    except Exception:
+        logger.exception("Failed to process update id=%s", update.update_id)
+        return web.Response(status=500, text="Processing failed")
+
     return web.Response(status=200, text="ok")
 
 
@@ -109,12 +157,15 @@ async def _on_startup(app):
         secret_token=WEBHOOK_SECRET,
         drop_pending_updates=True,
     )
-    logger.info("Telegram webhook registered: %s", full_webhook_url)
+    info = await application.bot.get_webhook_info()
+    logger.info("Telegram webhook registered: %s", info.url)
+    if info.last_error_message:
+        logger.warning("Webhook last error: %s", info.last_error_message)
 
 
 async def _on_shutdown(app):
     application = app["ptb_app"]
-    await application.bot.delete_webhook(drop_pending_updates=False)
+    # Do NOT delete webhook on shutdown — Render restarts would break the bot.
     await application.stop()
     await application.shutdown()
     logger.info("Bot shutdown complete")
@@ -124,7 +175,8 @@ async def run_webhook_server():
     base_url = _resolve_public_url()
     if not base_url:
         raise RuntimeError(
-            "WEBHOOK_URL or RENDER_EXTERNAL_URL must be set for webhook mode."
+            "Set WEBHOOK_URL=https://your-app.onrender.com on Render "
+            "(or rely on RENDER_EXTERNAL_URL / RENDER_EXTERNAL_HOSTNAME)."
         )
 
     webhook_path = f"/webhook/{WEBHOOK_SECRET}"
@@ -135,6 +187,7 @@ async def run_webhook_server():
     app["ptb_app"] = application
     app["public_url"] = base_url
     app["webhook_path"] = webhook_path
+    app["webhook_secret"] = WEBHOOK_SECRET
 
     app.router.add_get("/", _handle_root)
     app.router.add_get("/healthz", _handle_healthz)
@@ -163,7 +216,6 @@ async def run_webhook_server():
         try:
             loop.add_signal_handler(sig, _stop)
         except NotImplementedError:
-            # Windows may not support all signals in add_signal_handler
             pass
 
     await stop_event.wait()
@@ -173,7 +225,7 @@ async def run_webhook_server():
 def run_polling():
     application = build_application()
     logger.info("Bot is running in POLLING mode...")
-    application.run_polling()
+    application.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
