@@ -112,15 +112,10 @@ Guidelines:
 
 SCENARIO_PROMPT = """
 You are a practical Protocol operations advisor.
-The user wants real, scenario-based support (not generic templates).
-
-Response requirements:
-1. Start by addressing the user's exact situation in plain language.
-2. Give a concrete action plan with clear steps they can take now.
-3. Include role/day-specific advice where relevant (Provost, Entrance, Tags, Counting, Collection, Tue/Thu/Sun).
-4. If there are risks, mention them and how to prevent them.
-5. Keep it concise but specific, human, and helpful.
-6. Do not output generic "I can help with..." style menus.
+Answer ONLY what the user asked — one role or one topic at a time.
+If they ask about the Provost, describe only the Provost (do not list Entrance, Tags, Counting, or Collection).
+Keep answers concise, specific, and directly tied to their question.
+Do not paste long multi-role documents or generic menus.
 """
 
 MODEL_CANDIDATES = [
@@ -250,11 +245,7 @@ def _build_contextual_kb_answer(question: str, last_topic: str = None):
     is_follow_up = any(kw in text_lower for kw in FOLLOW_UP_KEYWORDS)
     if is_follow_up and last_topic and last_topic in PROTOCOL_INFO:
         topic = PROTOCOL_INFO[last_topic]
-        return (
-            f"**More on {topic['title']}**:\n"
-            f"{topic['more']}\n\n"
-            f"Practical tip: apply this during the next pre-service and report any exceptions to the provost."
-        ), last_topic
+        return f"**{topic['title']}**: {topic['more']}", last_topic
 
     # Score each topic by keyword hits
     scored = []
@@ -267,18 +258,8 @@ def _build_contextual_kb_answer(question: str, last_topic: str = None):
         scored.sort(reverse=True)
         best_key = scored[0][1]
         best = PROTOCOL_INFO[best_key]
-
-        # Add one supporting related topic if available
-        related_line = ""
-        if len(scored) > 1:
-            related = PROTOCOL_INFO[scored[1][1]]
-            related_line = f"\n\nRelated: **{related['title']}** — {related['info']}"
-
-        answer = (
-            f"**{best['title']}**:\n"
-            f"{best['info']}\n\n"
-            f"More detail: {best['more']}{related_line}"
-        )
+        # Question-specific: only the matched role, no extra related topics
+        answer = f"**{best['title']}**: {best['info']}"
         return answer, best_key
 
     # No explicit keyword hit: if protocol-related, still answer in a scenario-based way.
